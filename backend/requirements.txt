@@ -1,4 +1,4 @@
 fastapi
 uvicorn
-paddleocr
 pillow
+pytesseract

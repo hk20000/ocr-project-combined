@@ -1,12 +1,12 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_spinkit/flutter_spinkit.dart';
-import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:flutter_tesseract_ocr/flutter_tesseract_ocr.dart';
+import 'package:pdf/widgets.dart' as pw;
 
 void main() {
   runApp(const MedicalOcrApp());
@@ -41,12 +41,10 @@ class _OcrHomePageState extends State<OcrHomePage> {
   bool _isProcessing = false;
   String _outputFormat = 'text';
   String? _recognizedText;
-  List<dynamic> _entities = [];
-  List<dynamic> _segments = [];
+  // Entities/segments are backend features; omitted for on-device OCR.
   String? _savedPdfPath;
   String? _errorMessage;
 
-  static const String _baseUrl = 'http://localhost:8000';
 
   Future<void> _pickImage(ImageSource source) async {
     try {
@@ -55,8 +53,6 @@ class _OcrHomePageState extends State<OcrHomePage> {
         setState(() {
           _selectedImage = image;
           _recognizedText = null;
-          _entities = [];
-          _segments = [];
           _savedPdfPath = null;
           _errorMessage = null;
         });
@@ -81,30 +77,21 @@ class _OcrHomePageState extends State<OcrHomePage> {
       _errorMessage = null;
     });
 
-    final uri = Uri.parse('$_baseUrl/ocr/?output=$_outputFormat');
-    final request = http.MultipartRequest('POST', uri)
-      ..files.add(await http.MultipartFile.fromPath('file', _selectedImage!.path));
-
     try {
-      final streamedResponse = await request.send();
-      final response = await http.Response.fromStream(streamedResponse);
-      if (response.statusCode != 200) {
-        throw HttpException('Request failed: ${response.statusCode}');
-      }
-
-      final Map<String, dynamic> payload = jsonDecode(response.body);
+      // Run on-device OCR with Tesseract (uses assets/tessdata for traineddata).
+      final text = await FlutterTesseractOcr.extractText(
+        _selectedImage!.path,
+        language: 'eng',
+      );
 
       if (!mounted) return;
 
       setState(() {
-        _recognizedText = payload['text'] as String?;
-        _entities = (payload['entities'] as List<dynamic>? ?? []);
-        _segments = (payload['segments'] as List<dynamic>? ?? []);
+        _recognizedText = text;
       });
 
-      if ((_outputFormat == 'pdf' || _outputFormat == 'both') &&
-          payload['pdf_base64'] != null) {
-        await _savePdf(payload['pdf_base64'] as String);
+      if (_outputFormat == 'pdf' || _outputFormat == 'both') {
+        await _savePdfFromText(text ?? '');
       }
     } catch (error) {
       if (!mounted) return;
@@ -120,11 +107,18 @@ class _OcrHomePageState extends State<OcrHomePage> {
     }
   }
 
-  Future<void> _savePdf(String base64Data) async {
-    final bytes = base64Decode(base64Data);
+  Future<void> _savePdfFromText(String text) async {
+    final pdf = pw.Document();
+    pdf.addPage(
+      pw.MultiPage(
+        build: (context) => [
+          pw.Text(text, style: const pw.TextStyle(fontSize: 12)),
+        ],
+      ),
+    );
+    final bytes = await pdf.save();
     final directory = await getApplicationDocumentsDirectory();
-    final filename =
-        'ocr_output_${DateTime.now().millisecondsSinceEpoch}.pdf';
+    final filename = 'ocr_output_${DateTime.now().millisecondsSinceEpoch}.pdf';
     final file = File('${directory.path}/$filename');
     await file.writeAsBytes(bytes, flush: true);
 
@@ -150,40 +144,13 @@ class _OcrHomePageState extends State<OcrHomePage> {
   }
 
   Widget _buildEntities() {
-    if (_entities.isEmpty) {
-      return const Text('No medical entities detected yet.');
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: _entities
-          .map((entity) => Card(
-                margin: const EdgeInsets.symmetric(vertical: 4),
-                child: ListTile(
-                  title: Text(entity['text']?.toString() ?? ''),
-                  subtitle: Text(
-                    '${entity['entity']} • ${(entity['score'] as num?)?.toStringAsFixed(2) ?? '0.0'}',
-                  ),
-                ),
-              ))
-          .toList(),
-    );
+    // Entities are not produced in on-device OCR mode.
+    return const SizedBox.shrink();
   }
 
   Widget _buildSegments() {
-    if (_segments.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return ExpansionTile(
-      title: const Text('OCR Segments'),
-      children: _segments
-          .map((segment) => ListTile(
-                title: Text(segment['text']?.toString() ?? ''),
-                subtitle: Text('Box: ${segment['bbox']}'),
-              ))
-          .toList(),
-    );
+    // Bounding boxes not shown in this simplified setup.
+    return const SizedBox.shrink();
   }
 
   Widget _buildResults() {
@@ -223,14 +190,7 @@ class _OcrHomePageState extends State<OcrHomePage> {
               const SizedBox(height: 16),
             ],
           ),
-        const Text(
-          'Detected Medical Entities',
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-        ),
-        const SizedBox(height: 8),
-        _buildEntities(),
-        const SizedBox(height: 16),
-        _buildSegments(),
+        // No entities/segments in on-device mode
         if (_savedPdfPath != null) ...[
           const SizedBox(height: 16),
           Text('Saved PDF: $_savedPdfPath'),
@@ -253,10 +213,8 @@ class _OcrHomePageState extends State<OcrHomePage> {
       builder: (context) => AlertDialog(
         title: const Text('Connection Tips'),
         content: const Text(
-          'When running on a mobile emulator, replace "localhost" with\n'
-          '• Android Emulator: http://10.0.2.2:8000\n'
-          '• iOS Simulator: http://127.0.0.1:8000\n'
-          'For physical devices, ensure both the backend server and device are on the same network.'
+          'This build uses on-device OCR (Tesseract).\n'
+          'No backend connection is required.'
         ),
         actions: [
           TextButton(
